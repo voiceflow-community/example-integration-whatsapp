@@ -72,14 +72,13 @@ app.post('/webhook', async (req, res) => {
     const inboundMessageId = message.id
 
     const handleAction = async (action) => {
-      await sendTypingIndicator(phone_number_id, user_id, 'typing')
+      await sendTypingIndicator(phone_number_id, user_id)
       let interactError
       try {
         await interact(user_id, action, phone_number_id, user_name)
       } catch (err) {
         interactError = err
       } finally {
-        await sendTypingIndicator(phone_number_id, user_id, 'paused')
         if (inboundMessageId) {
           await sendReadReceipt(phone_number_id, inboundMessageId)
         }
@@ -193,26 +192,49 @@ app.get('/webhook', (req, res) => {
   res.status(403).send('Forbidden');
 })
 
-async function sendTypingIndicator(phone_number_id, to, state = 'typing') {
+async function sendTypingIndicator(phone_number_id, to) {
   try {
-    const typingType = state === 'paused' ? 'none' : 'text'
-    await axios({
-      method: 'POST',
-      url: `https://graph.facebook.com/${WHATSAPP_VERSION}/${phone_number_id}/messages`,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: 'Bearer ' + WHATSAPP_TOKEN,
+    const attempts = [
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'typing',
+        typing: { type: 'text' },
       },
-      data: {
+      {
         messaging_product: 'whatsapp',
         to,
-        recipient_type: 'individual',
-        type: 'typing',
-        typing: {
-          type: typingType,
-        },
+        type: 'action',
+        action: { typing: 'typing' },
       },
-    })
+      {
+        messaging_product: 'whatsapp',
+        to,
+        status: 'typing',
+      },
+    ]
+
+    for (const payload of attempts) {
+      try {
+        await axios({
+          method: 'POST',
+          url: `https://graph.facebook.com/${WHATSAPP_VERSION}/${phone_number_id}/messages`,
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer ' + WHATSAPP_TOKEN,
+          },
+          data: payload,
+        })
+        return
+      } catch (err) {
+        const code = err.response?.data?.error?.code
+        if (code !== 100) {
+          throw err
+        }
+      }
+    }
+    console.warn('Typing indicator not supported by current WhatsApp API version')
   } catch (error) {
     console.error(
       'Failed to send typing indicator:',
