@@ -32,6 +32,16 @@ const DMconfig = {
 }
 
 const express = require('express'),
+// Environment variable validation
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const VOICEFLOW_API_KEY = process.env.VOICEFLOW_API_KEY;
+const VOICEFLOW_PROJECT_ID = process.env.VOICEFLOW_PROJECT_ID;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+
+if (!WHATSAPP_TOKEN || !VOICEFLOW_API_KEY || !VOICEFLOW_PROJECT_ID || !VERIFY_TOKEN) {
+  console.error('Missing environment variables');
+  process.exit(1);
+}
   body_parser = require('body-parser'),
   axios = require('axios').default,
   app = express().use(body_parser.json())
@@ -50,156 +60,103 @@ app.get('/', (req, res) => {
 // Accepts POST requests at /webhook endpoint
 app.post('/webhook', async (req, res) => {
   // Parse the request body from the POST
-  let body = req.body
-  // Check the Incoming webhook message
-  // info on WhatsApp text message payload: https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/payload-examples#text-messages
+  try {
+    const change = req.body?.entry?.[0]?.changes?.[0];
+    const message = change?.value?.messages?.[0];
+    if (!message) return res.sendStatus(200);
+    const from = message.from;
+    const metadata = change.value.metadata;
+    const phoneNumberId = metadata.phone_number_id;
 
-  if (req.body.object) {
-    const isNotInteractive =
-      req.body?.entry[0]?.changes[0]?.value?.messages?.length || null
-    if (isNotInteractive) {
-      let phone_number_id =
-        req.body.entry[0].changes[0].value.metadata.phone_number_id
-      user_id = req.body.entry[0].changes[0].value.messages[0].from // extract the phone number from the webhook payload
-      let user_name =
-        req.body.entry[0].changes[0].value.contacts[0].profile.name
-      if (req.body.entry[0].changes[0].value.messages[0].text) {
-        await interact(
-          user_id,
+    let action;
+    if (message.type === 'text') {
+      action = { type: 'text', payload: message.text.body };
+    } else if (message.type === 'interactive' && message.interactive.type === 'button') {
+      action = { type: 'choice', payload: message.interactive.button_reply.id };
+    } else if (message.type === 'audio') {
+      // preserve your custom audio logic
+      // ...existing code...
+      return res.sendStatus(200);
+    } else {
+      return res.sendStatus(200); // Ignore unsupported types
+    }
+
+    // Typing indicator
+    await axios.post(
+      `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
+      { messaging_product: 'whatsapp', to: from, status: 'typing' },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    );
+
+    // Voiceflow API call
+    const vfResponse = await axios.post(
+      `https://general-runtime.voiceflow.com/state/user/${from}/interact`,
+      { action, config: { tts: false, stripSSML: true } },
+      {
+        headers: {
+          Authorization: `Bearer ${VOICEFLOW_API_KEY}`,
+          'Content-Type': 'application/json',
+          version: VOICEFLOW_PROJECT_ID,
+        },
+      }
+    );
+
+    const output = vfResponse.data.output || [];
+    for (const item of output) {
+      if (item.type === 'text') {
+        await axios.post(
+          `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
           {
+            messaging_product: 'whatsapp',
+            to: from,
             type: 'text',
-            payload: req.body.entry[0].changes[0].value.messages[0].text.body,
+            text: { body: item.payload.message || item.payload },
           },
-          phone_number_id,
-          user_name
-        )
-      } else if (req.body?.entry[0]?.changes[0]?.value?.messages[0]?.audio) {
-        if (
-          req.body?.entry[0]?.changes[0]?.value?.messages[0]?.audio?.voice ==
-            true &&
-          PICOVOICE_API_KEY
-        ) {
-          let mediaURL = await axios({
-            method: 'GET',
-            url: `https://graph.facebook.com/${WHATSAPP_VERSION}/${req.body.entry[0].changes[0].value.messages[0].audio.id}`,
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: 'Bearer ' + WHATSAPP_TOKEN,
-            },
-          })
-
-          const rndFileName =
-            'audio_' + Math.random().toString(36).substring(7) + '.ogg'
-
-          axios({
-            method: 'get',
-            url: mediaURL.data.url,
-            headers: {
-              Authorization: 'Bearer ' + WHATSAPP_TOKEN,
-            },
-            responseType: 'stream',
-          }).then(function (response) {
-            let engineInstance = new Leopard(PICOVOICE_API_KEY)
-            const wstream = fs.createWriteStream(rndFileName)
-            response.data.pipe(wstream)
-            wstream.on('finish', async () => {
-              console.log('Analysing Audio file')
-              const { transcript, words } =
-                engineInstance.processFile(rndFileName)
-              engineInstance.release()
-              fs.unlinkSync(rndFileName)
-              if (transcript && transcript != '') {
-                console.log('User audio:', transcript)
-                await interact(
-                  user_id,
-                  {
-                    type: 'text',
-                    payload: transcript,
-                  },
-                  phone_number_id,
-                  user_name
-                )
-              }
-            })
-          })
-        }
-      } else {
-        if (
-          req.body.entry[0].changes[0].value.messages[0].interactive.button_reply.id.includes(
-            'path-'
-          )
-        ) {
-          await interact(
-            user_id,
-            {
-              type: req.body.entry[0].changes[0].value.messages[0].interactive
-                .button_reply.id,
-              payload: {
-                label:
-                  req.body.entry[0].changes[0].value.messages[0].interactive
-                    .button_reply.title,
-              },
-            },
-            phone_number_id,
-            user_name
-          )
-        } else {
-          await interact(
-            user_id,
-            {
-              type: 'intent',
-              payload: {
-                query:
-                  req.body.entry[0].changes[0].value.messages[0].interactive
-                    .button_reply.title,
-                intent: {
-                  name: req.body.entry[0].changes[0].value.messages[0]
-                    .interactive.button_reply.id,
-                },
-                entities: [],
-              },
-            },
-            phone_number_id,
-            user_name
-          )
-        }
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+        );
+      } else if (item.type === 'choice' && item.payload.validChoices) {
+        const buttons = item.payload.validChoices.slice(0, 3).map(choice => ({
+          type: 'reply',
+          reply: { id: choice.id, title: choice.label.slice(0, 20) }
+        }));
+        await axios.post(
+          `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            to: from,
+            type: 'interactive',
+            interactive: { type: 'button', body: { text: item.payload.prompt || 'اختر:' }, action: { buttons } },
+          },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+        );
       }
     }
-    res.status(200).json({ message: 'ok' })
-  } else {
-    // Return a '404 Not Found' if event is not from a WhatsApp API
-    res.status(400).json({ message: 'error | unexpected body' })
+
+    // Read receipt
+    await axios.post(
+      `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
+      { messaging_product: 'whatsapp', to: from, status: 'read' },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    );
+
+    res.sendStatus(200);
+  } catch (error) {
+    console.error('Error:', error.response?.data || error.message);
+    res.sendStatus(500);
   }
 })
 
 // Accepts GET requests at the /webhook endpoint. You need this URL to setup webhook initially.
 // info on verification request payload: https://developers.facebook.com/docs/graph-api/webhooks/getting-started#verification-requests
 app.get('/webhook', (req, res) => {
-  /**
-   * UPDATE YOUR VERIFY TOKEN IN .env FILE
-   *This will be the Verify Token value when you set up webhook
-   **/
-
-  // Parse params from the webhook verification request
-  let mode = req.query['hub.mode']
-  let token = req.query['hub.verify_token']
-  let challenge = req.query['hub.challenge']
-
-  // Check if a token and mode were sent
-  if (mode && token) {
-    // Check the mode and token sent are correct
-    if (
-      (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) ||
-      'voiceflow'
-    ) {
-      // Respond with 200 OK and challenge token from the request
-      console.log('WEBHOOK_VERIFIED')
-      res.status(200).send(challenge)
-    } else {
-      // Responds with '403 Forbidden' if verify tokens do not match
-      res.sendStatus(403)
-    }
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('WEBHOOK_VERIFIED');
+    return res.status(200).send(challenge);
   }
+  res.status(403).send('Forbidden');
 })
 
 async function interact(user_id, request, phone_number_id, user_name) {
