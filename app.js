@@ -195,6 +195,7 @@ app.get('/webhook', (req, res) => {
 
 async function sendTypingIndicator(phone_number_id, to, state = 'typing') {
   try {
+    const typingType = state === 'paused' ? 'none' : 'text'
     await axios({
       method: 'POST',
       url: `https://graph.facebook.com/${WHATSAPP_VERSION}/${phone_number_id}/messages`,
@@ -205,9 +206,10 @@ async function sendTypingIndicator(phone_number_id, to, state = 'typing') {
       data: {
         messaging_product: 'whatsapp',
         to,
-        type: 'action',
-        action: {
-          typing: state,
+        recipient_type: 'individual',
+        type: 'typing',
+        typing: {
+          type: typingType,
         },
       },
     })
