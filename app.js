@@ -1,11 +1,17 @@
 'use strict'
 require('dotenv').config()
-const WHATSAPP_VERSION = process.env.WHATSAPP_VERSION || 'v17.0'
+const WHATSAPP_VERSION = process.env.WHATSAPP_VERSION || 'v18.0'
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN
 
-const VF_API_KEY = process.env.VF_API_KEY
+const VF_API_KEY = process.env.VF_API_KEY || process.env.VOICEFLOW_API_KEY
 const VF_VERSION_ID = process.env.VF_VERSION_ID || 'development'
 const VF_PROJECT_ID = process.env.VF_PROJECT_ID || null
+
+if (!WHATSAPP_TOKEN || !VF_API_KEY || !VERIFY_TOKEN) {
+  console.error('Missing environment variables')
+  process.exit(1)
+}
 
 const fs = require('fs')
 
@@ -32,16 +38,6 @@ const DMconfig = {
 }
 
 const express = require('express'),
-// Environment variable validation
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const VOICEFLOW_API_KEY = process.env.VOICEFLOW_API_KEY;
-const VOICEFLOW_PROJECT_ID = process.env.VOICEFLOW_PROJECT_ID;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-
-if (!WHATSAPP_TOKEN || !VOICEFLOW_API_KEY || !VOICEFLOW_PROJECT_ID || !VERIFY_TOKEN) {
-  console.error('Missing environment variables');
-  process.exit(1);
-}
   body_parser = require('body-parser'),
   axios = require('axios').default,
   app = express().use(body_parser.json())
@@ -59,90 +55,128 @@ app.get('/', (req, res) => {
 
 // Accepts POST requests at /webhook endpoint
 app.post('/webhook', async (req, res) => {
-  // Parse the request body from the POST
   try {
-    const change = req.body?.entry?.[0]?.changes?.[0];
-    const message = change?.value?.messages?.[0];
-    if (!message) return res.sendStatus(200);
-    const from = message.from;
-    const metadata = change.value.metadata;
-    const phoneNumberId = metadata.phone_number_id;
-
-    let action;
-    if (message.type === 'text') {
-      action = { type: 'text', payload: message.text.body };
-    } else if (message.type === 'interactive' && message.interactive.type === 'button') {
-      action = { type: 'choice', payload: message.interactive.button_reply.id };
-    } else if (message.type === 'audio') {
-      // preserve your custom audio logic
-      // ...existing code...
-      return res.sendStatus(200);
-    } else {
-      return res.sendStatus(200); // Ignore unsupported types
+    if (!req.body.object) {
+      return res.status(400).json({ message: 'error | unexpected body' })
     }
 
-    // Typing indicator
-    await axios.post(
-      `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
-      { messaging_product: 'whatsapp', to: from, status: 'typing' },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
+    const change = req.body?.entry?.[0]?.changes?.[0]
+    const message = change?.value?.messages?.[0]
+    if (!message) {
+      return res.status(200).json({ message: 'ok' })
+    }
 
-    // Voiceflow API call
-    const vfResponse = await axios.post(
-      `https://general-runtime.voiceflow.com/state/user/${from}/interact`,
-      { action, config: { tts: false, stripSSML: true } },
-      {
+    const phone_number_id = change.value.metadata.phone_number_id
+    user_id = message.from
+    user_name = change.value?.contacts?.[0]?.profile?.name
+    const inboundMessageId = message.id
+
+    const handleAction = async (action) => {
+      await sendTypingIndicator(phone_number_id, user_id, 'typing')
+      let interactError
+      try {
+        await interact(user_id, action, phone_number_id, user_name)
+      } catch (err) {
+        interactError = err
+      } finally {
+        await sendTypingIndicator(phone_number_id, user_id, 'paused')
+        if (inboundMessageId) {
+          await sendReadReceipt(phone_number_id, inboundMessageId)
+        }
+      }
+
+      if (interactError) {
+        throw interactError
+      }
+    }
+
+    if (message.text) {
+      await handleAction({
+        type: 'text',
+        payload: message.text.body,
+      })
+    } else if (message?.audio?.voice === true && PICOVOICE_API_KEY) {
+      const mediaURL = await axios({
+        method: 'GET',
+        url: `https://graph.facebook.com/${WHATSAPP_VERSION}/${message.audio.id}`,
         headers: {
-          Authorization: `Bearer ${VOICEFLOW_API_KEY}`,
           'Content-Type': 'application/json',
-          version: VOICEFLOW_PROJECT_ID,
+          Authorization: 'Bearer ' + WHATSAPP_TOKEN,
         },
-      }
-    );
+      })
 
-    const output = vfResponse.data.output || [];
-    for (const item of output) {
-      if (item.type === 'text') {
-        await axios.post(
-          `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
-          {
-            messaging_product: 'whatsapp',
-            to: from,
-            type: 'text',
-            text: { body: item.payload.message || item.payload },
+      const rndFileName =
+        'audio_' + Math.random().toString(36).substring(7) + '.ogg'
+
+      const audioResponse = await axios({
+        method: 'GET',
+        url: mediaURL.data.url,
+        headers: {
+          Authorization: 'Bearer ' + WHATSAPP_TOKEN,
+        },
+        responseType: 'stream',
+      })
+
+      await new Promise((resolve, reject) => {
+        const engineInstance = new Leopard(PICOVOICE_API_KEY)
+        const wstream = fs.createWriteStream(rndFileName)
+        audioResponse.data.pipe(wstream)
+
+        wstream.on('finish', () => {
+          ;(async () => {
+            try {
+              console.log('Analysing Audio file')
+              const { transcript } = engineInstance.processFile(rndFileName)
+              engineInstance.release()
+              fs.unlinkSync(rndFileName)
+              if (transcript && transcript !== '') {
+                console.log('User audio:', transcript)
+                await handleAction({
+                  type: 'text',
+                  payload: transcript,
+                })
+              }
+              resolve()
+            } catch (err) {
+              engineInstance.release()
+              fs.unlinkSync(rndFileName)
+              reject(err)
+            }
+          })()
+        })
+
+        wstream.on('error', (err) => {
+          engineInstance.release()
+          reject(err)
+        })
+      })
+    } else if (message?.interactive?.button_reply) {
+      const buttonReply = message.interactive.button_reply
+      if (buttonReply.id.includes('path-')) {
+        await handleAction({
+          type: buttonReply.id,
+          payload: {
+            label: buttonReply.title,
           },
-          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-        );
-      } else if (item.type === 'choice' && item.payload.validChoices) {
-        const buttons = item.payload.validChoices.slice(0, 3).map(choice => ({
-          type: 'reply',
-          reply: { id: choice.id, title: choice.label.slice(0, 20) }
-        }));
-        await axios.post(
-          `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
-          {
-            messaging_product: 'whatsapp',
-            to: from,
-            type: 'interactive',
-            interactive: { type: 'button', body: { text: item.payload.prompt || 'اختر:' }, action: { buttons } },
+        })
+      } else {
+        await handleAction({
+          type: 'intent',
+          payload: {
+            query: buttonReply.title,
+            intent: {
+              name: buttonReply.id,
+            },
+            entities: [],
           },
-          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-        );
+        })
       }
     }
 
-    // Read receipt
-    await axios.post(
-      `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
-      { messaging_product: 'whatsapp', to: from, status: 'read' },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
-
-    res.sendStatus(200);
+    res.status(200).json({ message: 'ok' })
   } catch (error) {
-    console.error('Error:', error.response?.data || error.message);
-    res.sendStatus(500);
+    console.error('Error:', error.response?.data || error.message)
+    res.status(500).json({ message: 'error' })
   }
 })
 
@@ -158,6 +192,55 @@ app.get('/webhook', (req, res) => {
   }
   res.status(403).send('Forbidden');
 })
+
+async function sendTypingIndicator(phone_number_id, to, state = 'typing') {
+  try {
+    await axios({
+      method: 'POST',
+      url: `https://graph.facebook.com/${WHATSAPP_VERSION}/${phone_number_id}/messages`,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + WHATSAPP_TOKEN,
+      },
+      data: {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'action',
+        action: {
+          typing: state,
+        },
+      },
+    })
+  } catch (error) {
+    console.error(
+      'Failed to send typing indicator:',
+      error.response?.data || error.message
+    )
+  }
+}
+
+async function sendReadReceipt(phone_number_id, messageId) {
+  try {
+    await axios({
+      method: 'POST',
+      url: `https://graph.facebook.com/${WHATSAPP_VERSION}/${phone_number_id}/messages`,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + WHATSAPP_TOKEN,
+      },
+      data: {
+        messaging_product: 'whatsapp',
+        status: 'read',
+        message_id: messageId,
+      },
+    })
+  } catch (error) {
+    console.error(
+      'Failed to send read receipt:',
+      error.response?.data || error.message
+    )
+  }
+}
 
 async function interact(user_id, request, phone_number_id, user_name) {
   clearTimeout(noreplyTimeout)
