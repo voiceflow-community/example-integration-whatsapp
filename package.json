@@ -1,6 +1,6 @@
 {
   "name": "example-whatsapp-voiceflow-integration",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "WhatsApp Webhook for Voiceflow DM API",
   "main": "app.js",
   "scripts": {
@@ -10,6 +10,7 @@
   "license": "ISC",
   "dependencies": {
     "@picovoice/leopard-node": "^1.2.0",
+    "@vercel/blob": "^0.27.0",
     "axios": "^1.4.0",
     "body-parser": "^1.20.2",
     "dotenv": "^16.3.1",

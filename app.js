@@ -16,6 +16,7 @@ if (!WHATSAPP_TOKEN || !VF_API_KEY || !VERIFY_TOKEN) {
 const fs = require('fs')
 
 const PICOVOICE_API_KEY = process.env.PICOVOICE_API_KEY || null
+const BLOB_READ_WRITE_TOKEN = process.env.BLOB_READ_WRITE_TOKEN || null
 
 const {
   Leopard,
@@ -47,7 +48,7 @@ app.listen(process.env.PORT || 3000, () => console.log('webhook is listening'))
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    info: 'WhatsApp API v1.1.2 | V⦿iceflow | 2023',
+    info: 'WhatsApp API v1.1.3 | V⦿iceflow | 2024',
     status: 'healthy',
     error: null,
   })
@@ -94,6 +95,59 @@ app.post('/webhook', async (req, res) => {
         type: 'text',
         payload: message.text.body,
       })
+    } else if (message?.image && BLOB_READ_WRITE_TOKEN) {
+      // Handle incoming images from WhatsApp
+      try {
+        console.log('Processing WhatsApp image...')
+        
+        // 1. Get image URL from Meta
+        const mediaURL = await axios({
+          method: 'GET',
+          url: `https://graph.facebook.com/${WHATSAPP_VERSION}/${message.image.id}`,
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer ' + WHATSAPP_TOKEN,
+          },
+        })
+
+        // 2. Download image from Meta
+        const imageResponse = await axios({
+          method: 'GET',
+          url: mediaURL.data.url,
+          headers: {
+            Authorization: 'Bearer ' + WHATSAPP_TOKEN,
+          },
+          responseType: 'arraybuffer',
+        })
+
+        // 3. Upload to Vercel Blob
+        const { put } = require('@vercel/blob')
+        const mimeType = mediaURL.data.mime_type || 'image/jpeg'
+        const ext = mimeType.split('/')[1] || 'jpg'
+        const { url: publicUrl } = await put(
+          `whatsapp-${Date.now()}.${ext}`,
+          Buffer.from(imageResponse.data),
+          {
+            access: 'public',
+            token: BLOB_READ_WRITE_TOKEN,
+            contentType: mimeType,
+          }
+        )
+
+        console.log('Image uploaded to:', publicUrl)
+
+        // 4. Send public URL to Voiceflow
+        await handleAction({
+          type: 'text',
+          payload: publicUrl,
+        })
+      } catch (err) {
+        console.error('Failed to process image:', err.response?.data || err.message)
+        await handleAction({
+          type: 'text',
+          payload: 'Sorry, I could not process that image.',
+        })
+      }
     } else if (message?.audio?.voice === true && PICOVOICE_API_KEY) {
       const mediaURL = await axios({
         method: 'GET',
