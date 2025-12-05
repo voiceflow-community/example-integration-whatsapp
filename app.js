@@ -11,6 +11,11 @@ const fs = require('fs')
 
 const PICOVOICE_API_KEY = process.env.PICOVOICE_API_KEY || null
 
+// Validate user_id: allow only E.164-like phone numbers (optional +, 8-15 digits)
+function isValidUserId(user_id) {
+  return typeof user_id === "string" && /^\+?[1-9]\d{7,14}$/.test(user_id);
+}
+
 const {
   Leopard,
   LeopardActivationLimitReached,
@@ -61,6 +66,11 @@ app.post('/webhook', async (req, res) => {
       let phone_number_id =
         req.body.entry[0].changes[0].value.metadata.phone_number_id
       user_id = req.body.entry[0].changes[0].value.messages[0].from // extract the phone number from the webhook payload
+      // Validate user_id before using it to prevent SSRF
+      if (!isValidUserId(user_id)) {
+        res.status(400).json({ message: 'Invalid user ID format.' });
+        return;
+      }
       let user_name =
         req.body.entry[0].changes[0].value.contacts[0].profile.name
       if (req.body.entry[0].changes[0].value.messages[0].text) {
