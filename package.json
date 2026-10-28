@@ -11,8 +11,8 @@
   "dependencies": {
     "@picovoice/leopard-node": "^1.2.0",
     "axios": "^1.20.0",
-    "body-parser": "^1.20.2",
+    "body-parser": "^1.20.9",
     "dotenv": "^16.3.1",
-    "express": "^4.22.1"
+    "express": "^4.22.3"
   }
 }
